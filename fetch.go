@@ -2,6 +2,7 @@ package main
 
 import (
   "os"
+  "bufio"
   "net/http"
   "encoding/json"
   "io/ioutil"
@@ -13,48 +14,17 @@ import (
 )
 
 type Response struct {
-  NextPageToken string    `json:"nextPageToken"`
-  Items         []Items   `json:"items"`
-}
-
-type Items struct {
-  Id              string          `json:"id"`
-  Snippet         Snippet         `json:"snippet"`
-  ContentDetails  ContentDetails  `json:"contentDetails"`
-  Statistics      Statistics      `json:"statistics"`
-  TopicDetails    TopicDetails    `json:"topicDetails"`
-}
-
-type Snippet struct {
-  PublishedAt   string        `json:"publishedAt"`
-  ChannelId     string        `json:"channelId"`
-  Title         string        `json:"title"`
-  Description   string        `json:"description"`
-  Thumbnails    struct {
-    Default     struct {
-      Url       string        `json:"url"`
-    } `json:"default"`
-  } `json:"thumbnails"`
-  Tags          []string      `json:"tags"`
-  CategoryId    string        `json:"categoryId"`
-}
-
-type ContentDetails struct {
-  Duration      string        `json:"duration"`
-}
-
-type Statistics  struct {
-  ViewCount      string       `json:"viewCount"`
-}
-
-type TopicDetails struct {
-  RelevantTopicIds  []string  `json:"relevantTopicIds"`
-  TopicCategories   []string  `json:"topicCategories"`
+  NextPageToken   string
+  Items           []struct {
+    Snippet       struct {
+      ChannelId   string
+    }
+  }
 }
 
 func main() {
-  if (len(os.Args) < 2) {
-    fmt.Println("Usage: ./youtube-fetcher <output_file>")
+  if len(os.Args) < 6 {
+    fmt.Println("Usage: ./youtube-fetcher <snippet_output_file> <contentDetails_output_file> <statistics_output_file> <topicDetails_output_file> <query_file>")
     os.Exit(2)
   }
   fmt.Println("Running fetcher...")
@@ -73,17 +43,48 @@ func main() {
   }
   defer f1.Close()
 
+  f2, err := os.OpenFile(os.Args[2], os.O_APPEND | os.O_WRONLY, 0622)
+  if err != nil {
+    panic(err)
+  }
+  defer f2.Close()
+
+  f3, err := os.OpenFile(os.Args[3], os.O_APPEND | os.O_WRONLY, 0622)
+  if err != nil {
+    panic(err)
+  }
+  defer f3.Close()
+
+  f4, err := os.OpenFile(os.Args[4], os.O_APPEND | os.O_WRONLY, 0622)
+  if err != nil {
+    panic(err)
+  }
+  defer f4.Close()
+
+  f5, err := os.OpenFile(os.Args[5], os.O_RDONLY, 0622)
+  if err != nil {
+    panic(err)
+  }
+  defer f5.Close()
+
+  l, err := bufio.NewReader(f5).ReadString('\n')
+  if err != nil {
+    panic(err)
+  }
+
+  topics := strings.Split(l, ", ")
+
   client := &http.Client{}
 
   req, err := http.NewRequest("GET", "https://www.googleapis.com/youtube/v3/search", nil)
   if err != nil {
     panic(err)
   }
-  // old topics: "Autos & Vehicle", " Film & Animation", "Music", "Pets & Animals", "Sports", "Short Movies", "Gaming", "Videoblogging", "People & Blogs", "Comedy", "Entertainment", "News & Politics", "Howto & Style", "Education", "Nonprofits & Activism", "Movies", "Anime/Animation", "Action/Adventure", "Classics", "Comedy", "Documentary", "Drama", "Foreign", "Horror", "Sci-Fi/Fantasy", "Thriller", "Shorts", "Shows", "Trailers", "JavaScript", 
-  topics := []string{"Magic", "Dance"}
+
 
   q := req.URL.Query()
-  q.Add("q", "Pokemon")
+  q.Add("q", topics[0])
+  topics = topics[1:]
   q.Add("part", "snippet")
   q.Add("chart", "mostPopular")
   q.Add("maxResults", "50")
@@ -96,14 +97,13 @@ func main() {
     for {
       id := <-ch
       go func(v string) {
-        vids = vids + videos(v, mu, f1)
+        vids = vids + videos(v, mu, f1, f2, f3, f4)
       }(id)
     }
   }()
 
   c := make(map[string]bool)
-
-  for ; vids < 1; {
+  for ; vids < 10100100; {
     req.URL.RawQuery = q.Encode()
     resp, err := client.Do(req)
     if err != nil {
@@ -115,41 +115,27 @@ func main() {
     json.Unmarshal(respData, &respObject)
 
 
+    ids := []string{}
     for _, item := range respObject.Items {
-      c[item.Snippet.ChannelId] = true
+      if _, ok := c[item.Snippet.ChannelId]; !ok {
+          ids = append(ids, item.Snippet.ChannelId)
+          c[item.Snippet.ChannelId] = true
+        } 
+    }
+
+    ids = channels(strings.Join(ids, ","))
+
+    for _, id := range ids {
+      go func(p string) {
+        for _, v := range playlists(p) {
+          ch <- v
+        }
+      }(id)
     }
 
     resp.Body.Close()
 
     if respObject.NextPageToken == "" {
-      ids := []string{}
-      for k := range c {
-        ids = append(ids, k)
-      }
-
-      arr := [][]string{}
-      for {
-        arr = append(arr, ids[0:50])
-        if (len(ids) > 50) {
-          ids = ids[50:]
-        } else {
-          break
-        }
-      }
-      
-      for _, ids := range arr {
-        ids = channels(strings.Join(ids, ","))
-
-        for _, id := range ids {
-          go func(p string) {
-            for _, v := range playlists(p) {
-              ch <- v
-            }
-          }(id)
-        }
-      }
-      c = make(map[string]bool)
-
       if (len(topics) > 0) {
           q.Set("q", topics[0])
           f.WriteString(topics[0] + "\n")
