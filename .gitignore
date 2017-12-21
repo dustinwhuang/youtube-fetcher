@@ -1,3 +1,4 @@
 data
-youtube-fetcher
 *.json
+test
+tokens.log
