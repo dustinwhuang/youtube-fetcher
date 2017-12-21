@@ -1,154 +1,143 @@
 package main
 
 import (
-  "os"
-  "bufio"
-  "net/http"
-  "encoding/json"
-  "io/ioutil"
-  "fmt"
-  "strings"
-  "strconv"
-  "time"
-  "sync"
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 )
 
 type Response struct {
-  NextPageToken   string
-  Items           []struct {
-    Snippet       struct {
-      ChannelId   string
-    }
-  }
+	NextPageToken string
+	Items         []struct {
+		Snippet struct {
+			ChannelId string
+		}
+	}
 }
 
 func main() {
-  if len(os.Args) < 6 {
-    fmt.Println("Usage: ./youtube-fetcher <snippet_output_file> <contentDetails_output_file> <statistics_output_file> <topicDetails_output_file> <query_file>")
-    os.Exit(2)
-  }
-  fmt.Println("Running fetcher...")
-  start := time.Now()
-  vids := 0
+	if len(os.Args) < 6 {
+		fmt.Println("Usage: ./youtube-fetcher <snippet_output_file> <contentDetails_output_file> <statistics_output_file> <topicDetails_output_file> <query_file>")
+		os.Exit(2)
+	}
+	fmt.Println("Running fetcher...")
+	start := time.Now()
+	vids := 0
 
-  f, err := os.OpenFile("tokens.csv", os.O_APPEND | os.O_WRONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f.Close()
+	f := [6]*os.File{}
+	var err error
 
-  f1, err := os.OpenFile(os.Args[1], os.O_APPEND | os.O_WRONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f1.Close()
+	f[0], err = os.OpenFile("tokens.log", os.O_APPEND|os.O_WRONLY, 0622)
+	if err != nil {
+		panic(err)
+	}
+	defer f[0].Close()
 
-  f2, err := os.OpenFile(os.Args[2], os.O_APPEND | os.O_WRONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f2.Close()
+	for i := 1; i < 5; i++ {
+		if _, err := os.Stat(os.Args[i]); os.IsNotExist(err) {
+			f[i], err = os.Create(os.Args[i])
+		} else {
+			f[i], err = os.OpenFile(os.Args[i], os.O_APPEND|os.O_WRONLY, 0622)
+			if err != nil {
+				panic(err)
+			}
+		}
+		defer f[i].Close()
+	}
 
-  f3, err := os.OpenFile(os.Args[3], os.O_APPEND | os.O_WRONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f3.Close()
+	f[5], err = os.OpenFile(os.Args[5], os.O_RDONLY, 0622)
+	if err != nil {
+		panic(err)
+	}
+	defer f[5].Close()
 
-  f4, err := os.OpenFile(os.Args[4], os.O_APPEND | os.O_WRONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f4.Close()
+	l, err := bufio.NewReader(f[5]).ReadString('\n')
+	if err != nil {
+		panic(err)
+	}
 
-  f5, err := os.OpenFile(os.Args[5], os.O_RDONLY, 0622)
-  if err != nil {
-    panic(err)
-  }
-  defer f5.Close()
+	topics := strings.Split(l, ", ")
 
-  l, err := bufio.NewReader(f5).ReadString('\n')
-  if err != nil {
-    panic(err)
-  }
+	client := &http.Client{}
 
-  topics := strings.Split(l, ", ")
+	req, err := http.NewRequest("GET", "https://www.googleapis.com/youtube/v3/search", nil)
+	if err != nil {
+		panic(err)
+	}
 
-  client := &http.Client{}
+	q := req.URL.Query()
+	q.Add("q", topics[0])
+	topics = topics[1:]
+	q.Add("part", "snippet")
+	q.Add("chart", "mostPopular")
+	q.Add("maxResults", "50")
+	q.Add("key", os.Getenv("YOUTUBE_KEY"))
+	q.Add("pageToken", "")
 
-  req, err := http.NewRequest("GET", "https://www.googleapis.com/youtube/v3/search", nil)
-  if err != nil {
-    panic(err)
-  }
+	mu := &sync.Mutex{}
+	ch := make(chan string)
+	go func() {
+		for {
+			id := <-ch
+			go func(v string) {
+				vids = vids + videos(v, mu, f[1], f[2], f[3], f[4])
+			}(id)
+		}
+	}()
 
+	cIds := make(map[string]bool)
+	for vids < 1 {
+		req.URL.RawQuery = q.Encode()
+		resp, err := client.Do(req)
+		if err != nil {
+			panic(err)
+		}
 
-  q := req.URL.Query()
-  q.Add("q", topics[0])
-  topics = topics[1:]
-  q.Add("part", "snippet")
-  q.Add("chart", "mostPopular")
-  q.Add("maxResults", "50")
-  q.Add("key", os.Getenv("YOUTUBE_KEY"))
-  q.Add("pageToken", "")
+		respData, err := ioutil.ReadAll(resp.Body)
+		respObject := Response{}
+		json.Unmarshal(respData, &respObject)
 
-  mu := &sync.Mutex{}
-  ch := make(chan string)
-  go func() {
-    for {
-      id := <-ch
-      go func(v string) {
-        vids = vids + videos(v, mu, f1, f2, f3, f4)
-      }(id)
-    }
-  }()
+		ids := []string{}
+		for _, item := range respObject.Items {
+			if _, ok := cIds[item.Snippet.ChannelId]; !ok {
+				ids = append(ids, item.Snippet.ChannelId)
+				cIds[item.Snippet.ChannelId] = true
+			}
+		}
 
-  c := make(map[string]bool)
-  for ; vids < 10100100; {
-    req.URL.RawQuery = q.Encode()
-    resp, err := client.Do(req)
-    if err != nil {
-      panic(err)
-    }
+		ids = channels(strings.Join(ids, ","))
 
-    respData, err := ioutil.ReadAll(resp.Body)
-    respObject := Response{}
-    json.Unmarshal(respData, &respObject)
+		for _, id := range ids {
+			go func(p string) {
+				for _, v := range playlists(p) {
+					ch <- v
+				}
+			}(id)
+		}
 
+		resp.Body.Close()
 
-    ids := []string{}
-    for _, item := range respObject.Items {
-      if _, ok := c[item.Snippet.ChannelId]; !ok {
-          ids = append(ids, item.Snippet.ChannelId)
-          c[item.Snippet.ChannelId] = true
-        } 
-    }
+		if respObject.NextPageToken == "" {
+			if len(topics) > 0 {
+				q.Set("q", topics[0])
+				f[0].WriteString(topics[0] + "\n")
+				topics = topics[1:]
+			} else {
+				break
+			}
+		}
+		q.Set("pageToken", respObject.NextPageToken)
+		f[0].WriteString(respObject.NextPageToken + "\n")
 
-    ids = channels(strings.Join(ids, ","))
+		fmt.Printf("\rFetched " + strconv.Itoa(vids) + " videos in " + time.Now().Sub(start).String())
+	}
 
-    for _, id := range ids {
-      go func(p string) {
-        for _, v := range playlists(p) {
-          ch <- v
-        }
-      }(id)
-    }
-
-    resp.Body.Close()
-
-    if respObject.NextPageToken == "" {
-      if (len(topics) > 0) {
-          q.Set("q", topics[0])
-          f.WriteString(topics[0] + "\n")
-          topics = topics[1:]
-      } else {
-        break
-      }
-    }
-    q.Set("pageToken", respObject.NextPageToken)
-    f.WriteString(respObject.NextPageToken + "\n")
-
-    fmt.Printf("\rFetched " + strconv.Itoa(vids) + " videos in " + time.Now().Sub(start).String())
-  }
-
-  fmt.Println("\rFetched " + strconv.Itoa(vids) + " videos in " + time.Now().Sub(start).String())
+	fmt.Println("\rFetched " + strconv.Itoa(vids) + " videos in " + time.Now().Sub(start).String())
 }
